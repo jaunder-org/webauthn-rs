@@ -39,3 +39,4 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
 webauthn-rs-device-catalog.workspace = true
+serde_json.workspace = true

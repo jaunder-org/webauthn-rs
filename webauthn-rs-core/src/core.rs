@@ -1053,6 +1053,28 @@ impl WebauthnCore {
         rsp: &PublicKeyCredential,
         state: &AuthenticationState,
     ) -> Result<AuthenticationResult, WebauthnError> {
+        self.authenticate_credential_with_counter_policy(rsp, state, true)
+    }
+
+    /// Process an assertion while preserving all verification checks except the
+    /// relying party's policy for non-monotonic signature counters.
+    ///
+    /// Callers that accept an anomalous counter still receive a fully verified
+    /// [`AuthenticationResult`]; they must retain the stored counter high-water mark.
+    pub fn authenticate_credential_allow_counter_anomalies(
+        &self,
+        rsp: &PublicKeyCredential,
+        state: &AuthenticationState,
+    ) -> Result<AuthenticationResult, WebauthnError> {
+        self.authenticate_credential_with_counter_policy(rsp, state, false)
+    }
+
+    fn authenticate_credential_with_counter_policy(
+        &self,
+        rsp: &PublicKeyCredential,
+        state: &AuthenticationState,
+        require_valid_counter_value: bool,
+    ) -> Result<AuthenticationResult, WebauthnError> {
         // Steps 1 through 4 are client side.
 
         // https://w3c.github.io/webauthn/#verifying-assertion
@@ -1170,7 +1192,7 @@ impl WebauthnCore {
                 needs_update = true;
             }
 
-            if self.require_valid_counter_value && counter_shows_compromise {
+            if require_valid_counter_value && counter_shows_compromise {
                 return Err(WebauthnError::CredentialPossibleCompromise);
             }
         }

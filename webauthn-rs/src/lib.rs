@@ -576,6 +576,51 @@ impl Webauthn {
             .map(|(ccr, rs)| (ccr, PasskeyRegistration { rs }))
     }
 
+    /// Start the opt-in registration policy for a discoverable Passkey.
+    ///
+    /// This retains the standard Passkey flow's no-attestation and required user
+    /// verification policies, but requires a resident credential so a later
+    /// account-discovering assertion can return its user handle.
+    pub fn start_resident_key_passkey_registration(
+        &self,
+        user_unique_id: Uuid,
+        user_name: &str,
+        user_display_name: &str,
+        exclude_credentials: Option<Vec<CredentialID>>,
+    ) -> WebauthnResult<(CreationChallengeResponse, PasskeyRegistration)> {
+        let extensions = Some(RequestRegistrationExtensions {
+            cred_protect: Some(CredProtect {
+                credential_protection_policy: CredentialProtectionPolicy::UserVerificationRequired,
+                enforce_credential_protection_policy: Some(false),
+            }),
+            uvm: Some(true),
+            cred_props: Some(true),
+            min_pin_length: None,
+            hmac_create_secret: None,
+        });
+
+        let builder = self
+            .core
+            .new_challenge_register_builder(
+                user_unique_id.as_bytes(),
+                user_name,
+                user_display_name,
+            )?
+            .attestation(AttestationConveyancePreference::None)
+            .credential_algorithms(self.algorithms.clone())
+            .require_resident_key(true)
+            .authenticator_attachment(None)
+            .user_verification_policy(UserVerificationPolicy::Required)
+            .reject_synchronised_authenticators(false)
+            .exclude_credentials(exclude_credentials)
+            .hints(None)
+            .extensions(extensions);
+
+        self.core
+            .generate_challenge_register(builder)
+            .map(|(ccr, rs)| (ccr, PasskeyRegistration { rs }))
+    }
+
     /// Initiate the registration of a 'Google Passkey stored in Google Password Manager' on an
     /// Android device with GMS Core.
     ///
@@ -719,6 +764,64 @@ impl Webauthn {
         state: &PasskeyAuthentication,
     ) -> WebauthnResult<AuthenticationResult> {
         self.core.authenticate_credential(reg, &state.ast)
+    }
+
+    /// Start an explicit discoverable Passkey assertion.
+    ///
+    /// The empty credential list intentionally emits an empty `allowCredentials`
+    /// option. Mediation remains omitted: this is a user-invoked account picker,
+    /// not conditional UI.
+    pub fn start_discoverable_passkey_authentication(
+        &self,
+    ) -> WebauthnResult<(RequestChallengeResponse, PasskeyAuthentication)> {
+        let policy = Some(UserVerificationPolicy::Required);
+
+        self.core
+            .new_challenge_authenticate_builder(Vec::new(), policy)
+            .map(|builder| {
+                builder
+                    .extensions(None)
+                    .allow_backup_eligible_upgrade(true)
+                    .hints(None)
+            })
+            .and_then(|builder| self.core.generate_challenge_authenticate(builder))
+            .map(|(response, ast)| (response, PasskeyAuthentication { ast }))
+    }
+
+    /// Return opaque user-handle and credential-ID bytes from a discoverable assertion.
+    ///
+    /// The caller resolves both values before verification; this wrapper does not
+    /// impose a UUID representation on relying-party account handles.
+    pub fn identify_discoverable_passkey_authentication<'a>(
+        &self,
+        credential: &'a PublicKeyCredential,
+    ) -> WebauthnResult<(&'a [u8], &'a [u8])> {
+        credential
+            .get_user_unique_id()
+            .map(|user_handle| (user_handle, credential.get_credential_id()))
+            .ok_or(WebauthnError::InvalidUserUniqueId)
+    }
+
+    /// Finish a discoverable Passkey assertion after the relying party has
+    /// resolved its opaque user handle and credential ID.
+    ///
+    /// Signature, challenge, origin, RP ID, presence, and user-verification
+    /// checks are unchanged. A valid counter anomaly returns the verified result
+    /// so the relying party can retain its stored counter high-water mark.
+    pub fn finish_discoverable_passkey_authentication(
+        &self,
+        credential: &PublicKeyCredential,
+        mut state: PasskeyAuthentication,
+        credentials: &[Passkey],
+    ) -> WebauthnResult<AuthenticationResult> {
+        state.ast.set_allowed_credentials(
+            credentials
+                .iter()
+                .map(|passkey| passkey.cred.clone())
+                .collect(),
+        );
+        self.core
+            .authenticate_credential_allow_counter_anomalies(credential, &state.ast)
     }
 
     /// Initiate the registration of a new security key for a user. A security key is any cryptographic
@@ -1544,6 +1647,52 @@ mod tests {
         eprintln!("rp_id: {:?}", builder.rp_id);
         let built = builder.build()?;
         eprintln!("rp_name: {}", built.core.rp_name());
+        Ok(())
+    }
+
+    #[test]
+    fn resident_key_passkey_policy_emits_required_discoverable_options(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::prelude::*;
+
+        let origin = Url::parse("https://example.com")?;
+        let webauthn = WebauthnBuilder::new("example.com", &origin)?.build()?;
+        let (options, _) = webauthn.start_resident_key_passkey_registration(
+            Uuid::new_v4(),
+            "user",
+            "User",
+            None,
+        )?;
+
+        let options = serde_json::to_value(options)?;
+        assert_eq!(options["publicKey"]["attestation"], "none");
+        assert_eq!(
+            options["publicKey"]["authenticatorSelection"]["residentKey"],
+            "required"
+        );
+        assert_eq!(
+            options["publicKey"]["authenticatorSelection"]["userVerification"],
+            "required"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discoverable_passkey_policy_emits_empty_allow_list_without_mediation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::prelude::*;
+
+        let origin = Url::parse("https://example.com")?;
+        let webauthn = WebauthnBuilder::new("example.com", &origin)?.build()?;
+        let (options, _) = webauthn.start_discoverable_passkey_authentication()?;
+
+        let options = serde_json::to_value(options)?;
+        assert_eq!(
+            options["publicKey"]["allowCredentials"],
+            serde_json::json!([])
+        );
+        assert!(options.get("mediation").is_none());
+        assert_eq!(options["publicKey"]["userVerification"], "required");
         Ok(())
     }
 }
