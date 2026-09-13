@@ -55,7 +55,6 @@ pub struct WebauthnCore {
     rp_id_hash: [u8; 32],
     allowed_origins: Vec<Url>,
     authenticator_timeout: Duration,
-    require_valid_counter_value: bool,
     #[allow(unused)]
     ignore_unsupported_attestation_formats: bool,
     allow_cross_origin: bool,
@@ -213,7 +212,6 @@ impl WebauthnCore {
             rp_id_hash,
             allowed_origins,
             authenticator_timeout,
-            require_valid_counter_value: true,
             ignore_unsupported_attestation_formats: true,
             allow_cross_origin: false,
             allow_subdomains_origin: allow_subdomains_origin.unwrap_or(false),
