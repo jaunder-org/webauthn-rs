@@ -25,6 +25,8 @@ pub struct SoftPasskey {
     tokens: HashMap<Vec<u8>, Vec<u8>>,
     counter: u32,
     falsify_uv: bool,
+    #[cfg(test)]
+    emit_zero_counter: bool,
 }
 
 impl SoftPasskey {
@@ -33,6 +35,16 @@ impl SoftPasskey {
             tokens: HashMap::new(),
             counter: 0,
             falsify_uv,
+            #[cfg(test)]
+            emit_zero_counter: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_zero_counter(falsify_uv: bool) -> Self {
+        Self {
+            emit_zero_counter: true,
+            ..Self::new(falsify_uv)
         }
     }
 }
@@ -484,12 +496,21 @@ impl U2FToken for SoftPasskey {
 
         let pkey = pkey::PKey::from_ec_key(eckey)?;
 
-        let mut signer = sign::Signer::new(hash::MessageDigest::sha256(), &pkey)?;
-
-        // Increment the counter.
-        self.counter += 1;
-        let counter = self.counter;
-
+        // The deterministic zero-counter fixture signs zero as authenticators
+        // without a signature counter do; production authenticator behavior is
+        // unchanged because this branch exists only in the test build.
+        #[cfg(test)]
+        let counter = if self.emit_zero_counter {
+            0
+        } else {
+            self.counter += 1;
+            self.counter
+        };
+        #[cfg(not(test))]
+        let counter = {
+            self.counter += 1;
+            self.counter
+        };
         let flags = if user_verification {
             0b00000101
         } else {
@@ -568,7 +589,7 @@ mod tests {
         let cred = wan.register_credential(&r, &reg_state, None).unwrap();
 
         let (chal, auth_state) = wan
-            .new_challenge_authenticate_builder(vec![cred], None)
+            .new_challenge_authenticate_builder(vec![cred.clone()], None)
             .and_then(|b| wan.generate_challenge_authenticate(b))
             .unwrap();
 
@@ -583,6 +604,82 @@ mod tests {
         let auth_res = wan
             .authenticate_credential(&r, &auth_state)
             .expect("webauth authentication denied");
-        info!("auth_res -> {:x?}", auth_res);
+        assert_eq!(auth_res.counter(), 1);
+
+        for stored_counter in [1, 2] {
+            let mut stored = serde_json::to_value(&cred).unwrap();
+            stored["counter"] = serde_json::json!(stored_counter);
+            let stored = serde_json::from_value(stored).unwrap();
+            let mut anomalous_state = auth_state.clone();
+            anomalous_state.set_allowed_credentials(vec![stored]);
+
+            assert!(matches!(
+                wan.authenticate_credential(&r, &anomalous_state),
+                Err(webauthn_rs_core::error::WebauthnError::CredentialPossibleCompromise)
+            ));
+            let result = wan
+                .authenticate_credential_allow_counter_anomalies(&r, &anomalous_state)
+                .unwrap();
+            assert_eq!(result.counter(), 1);
+            assert!(!result.backup_state());
+            assert!(!result.backup_eligible());
+        }
+    }
+    #[test]
+    fn signed_zero_counter_is_policy_selected_after_full_verification() {
+        let wan = Webauthn::new_unsafe_experts_only(
+            "https://localhost:8080/auth",
+            "localhost",
+            vec![url::Url::parse("https://localhost:8080").unwrap()],
+            AUTHENTICATOR_TIMEOUT,
+            None,
+            None,
+        );
+        let unique_id = [0_u8; 16];
+        let builder = wan
+            .new_challenge_register_builder(&unique_id, "counter", "Counter")
+            .unwrap()
+            .attestation(AttestationConveyancePreference::Direct)
+            .user_verification_policy(UserVerificationPolicy::Preferred);
+        let (registration, registration_state) = wan.generate_challenge_register(builder).unwrap();
+        let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::with_zero_counter(true));
+        let registration = authenticator
+            .do_registration(Url::parse("https://localhost:8080").unwrap(), registration)
+            .unwrap();
+        let credential = wan
+            .register_credential(&registration, &registration_state, None)
+            .unwrap();
+
+        let (authentication, authentication_state) = wan
+            .new_challenge_authenticate_builder(vec![credential.clone()], None)
+            .and_then(|builder| wan.generate_challenge_authenticate(builder))
+            .unwrap();
+        let assertion = authenticator
+            .do_authentication(
+                Url::parse("https://localhost:8080").unwrap(),
+                authentication,
+            )
+            .unwrap();
+
+        // A genuine signed 0/0 assertion remains accepted by the upstream default.
+        assert!(wan
+            .authenticate_credential(&assertion, &authentication_state)
+            .is_ok());
+
+        let mut stored = serde_json::to_value(&credential).unwrap();
+        stored["counter"] = serde_json::json!(1);
+        let stored = serde_json::from_value(stored).unwrap();
+        let mut anomalous_state = authentication_state.clone();
+        anomalous_state.set_allowed_credentials(vec![stored]);
+
+        assert!(matches!(
+            wan.authenticate_credential(&assertion, &anomalous_state),
+            Err(webauthn_rs_core::error::WebauthnError::CredentialPossibleCompromise)
+        ));
+        let result = wan
+            .authenticate_credential_allow_counter_anomalies(&assertion, &anomalous_state)
+            .unwrap();
+        assert!(!result.backup_state());
+        assert!(!result.backup_eligible());
     }
 }
