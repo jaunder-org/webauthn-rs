@@ -495,6 +495,7 @@ impl U2FToken for SoftPasskey {
         let eckey = ec::EcKey::private_key_from_der(pkder.as_slice())?;
 
         let pkey = pkey::PKey::from_ec_key(eckey)?;
+        let mut signer = sign::Signer::new(hash::MessageDigest::sha256(), &pkey)?;
 
         // The deterministic zero-counter fixture signs zero as authenticators
         // without a signature counter do; production authenticator behavior is
