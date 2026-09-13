@@ -65,7 +65,7 @@ impl Passkey {
     }
 
     /// Retrieve the stored signature-counter high-water mark.
-    pub fn counter(&self) -> Counter {
+    pub fn counter(&self) -> u32 {
         self.cred.counter
     }
 
