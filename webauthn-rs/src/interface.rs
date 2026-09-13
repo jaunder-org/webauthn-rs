@@ -64,6 +64,11 @@ impl Passkey {
         &self.cred.cred_id
     }
 
+    /// Retrieve the stored signature-counter high-water mark.
+    pub fn counter(&self) -> Counter {
+        self.cred.counter
+    }
+
     /// Retrieve the type of cryptographic algorithm used by this key
     pub fn cred_algorithm(&self) -> &COSEAlgorithm {
         &self.cred.cred.type_
